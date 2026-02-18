@@ -315,8 +315,8 @@ ${issueCulprit}
     logger.error('Failed to create GitHub issue from Sentry event', {
       statusCode: mappedError.status,
       reason: mappedError.message,
-          Sentry.captureException(error);
-    logger.error('Webhook processing failed', { error: error.message });
+          });
+        Sentry.captureException(error);
       isAxiosError: axios.isAxiosError(error),
       githubStatus: axios.isAxiosError(error) ? error.response?.status : undefined,
       githubRequestId: axios.isAxiosError(error)
@@ -337,9 +337,9 @@ app.use((err, _req, res, _next) => {
     return res.status(400).json({ error: 'Invalid JSON payload' });
   }
   logger.error('Unhandled server error', {
-      Sentry.captureException(err);
     reason: err?.message || 'unknown',
-  });
+      });
+    Sentry.captureException(err);
   return res.status(500).json({ error: 'Internal server error' });
 });
 
