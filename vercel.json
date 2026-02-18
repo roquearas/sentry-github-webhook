@@ -12,6 +12,10 @@
       "dest": "/api/webhook"
     },
     {
+      "src": "/sentry-webhook",
+      "dest": "/api/webhook"
+    },
+    {
       "src": "/health",
       "dest": "/api/health"
     }

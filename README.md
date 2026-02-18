@@ -12,7 +12,7 @@ Este projeto estabelece uma integração entre Sentry e GitHub, permitindo que t
 - 🏷️ Adiciona labels por nível de severidade (error, warning, info, etc)
 - 🔗 Vincula issues ao evento original do Sentry
 - 📊 Incluir estatísticas de eventos nos últimos 24h
-- ⚙️ Fácil deploy em Heroku ou Railway
+- ⚙️ Fácil deploy em Vercel (serverless)
 
 ## Requisitos
 
@@ -85,34 +85,30 @@ O servidor estará disponível em `http://localhost:3000`.
 - Configure a URL do webhook: `https://seu-dominio.com/webhook/sentry`
 - Ative os eventos: `issue.created`, `issue.resolved`, `error`
 
-## Deploy
+## Deploy (Vercel)
 
-### Heroku
+O projeto já inclui configuração serverless com:
 
-```bash
-heroku create seu-app-name
-heroku config:set GITHUB_TOKEN=seu_token
-heroku config:set GITHUB_OWNER=seu_usuario
-heroku config:set GITHUB_REPO=seu_repo
-heroku config:set SENTRY_WEBHOOK_SECRET=seu_secret
-git push heroku main
-```
+- `vercel.json`
+- `api/webhook.js`
+- `api/health.js`
 
-### Railway
-
-- Conecte seu repositório GitHub
-- Adicione as variáveis de ambiente no painel do Railway
-- Railway detectará automaticamente o `Procfile` e fará o deploy
+Guia completo em: `VERCEL_DEPLOY.md`.
 
 ## Estrutura do Projeto
 
 ```
 .
+├── api/
+│   ├── health.js          # Health check serverless
+│   └── webhook.js         # Webhook serverless para Sentry -> GitHub
 ├── .env.example          # Template de variáveis de ambiente
 ├── .gitignore            # Arquivos ignorados pelo Git
 ├── package.json          # Dependências e scripts
 ├── Procfile             # Configuração para Heroku/Railway
 ├── server.js            # Servidor Express principal
+├── vercel.json          # Rotas serverless da Vercel
+├── VERCEL_DEPLOY.md     # Guia de deploy na Vercel
 └── README.md            # Este arquivo
 ```
 
