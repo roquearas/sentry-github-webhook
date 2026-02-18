@@ -1,3 +1,12 @@
+// Sentry SDK Initialization
+const Sentry = require('@sentry/node');
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  environment: process.env.NODE_ENV || 'production',
+  tracesSampleRate: 1.0,
+});
+
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
@@ -233,6 +242,13 @@ app.post(WEBHOOK_PATHS, webhookLimiter, async (req, res) => {
     if (!isValidSentrySignature(req)) {
       logger.warn('Rejected webhook due to invalid signature', {
         path: req.path,
+
+          const transaction = Sentry.startTransaction({
+    op: 'webhook.sentry.event',
+    name: 'Process Sentry Webhook',
+  });
+
+  try {
         ip: req.ip,
       });
       return res.status(401).json({ error: 'Invalid webhook signature' });
@@ -310,6 +326,8 @@ ${issueCulprit}
     logger.error('Failed to create GitHub issue from Sentry event', {
       statusCode: mappedError.status,
       reason: mappedError.message,
+          Sentry.captureException(error);
+    logger.error('Webhook processing failed', { error: error.message });
       isAxiosError: axios.isAxiosError(error),
       githubStatus: axios.isAxiosError(error) ? error.response?.status : undefined,
       githubRequestId: axios.isAxiosError(error)
@@ -330,6 +348,7 @@ app.use((err, _req, res, _next) => {
     return res.status(400).json({ error: 'Invalid JSON payload' });
   }
   logger.error('Unhandled server error', {
+      Sentry.captureException(err);
     reason: err?.message || 'unknown',
   });
   return res.status(500).json({ error: 'Internal server error' });
