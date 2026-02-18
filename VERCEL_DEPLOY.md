@@ -20,6 +20,8 @@ Opcional (recomendado para segurança):
 
 ```bash
 SENTRY_WEBHOOK_SECRET=seu_secret_do_webhook
+ALERT_WEBHOOK_URL=https://seu-slack-ou-discord-webhook
+ALERT_WEBHOOK_TOKEN=opcional_bearer_token
 ```
 
 ## 2. Deploy

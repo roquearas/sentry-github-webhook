@@ -12,6 +12,10 @@ Este projeto estabelece uma integração entre Sentry e GitHub, permitindo que t
 - 🏷️ Adiciona labels por nível de severidade (error, warning, info, etc)
 - 🔗 Vincula issues ao evento original do Sentry
 - 📊 Incluir estatísticas de eventos nos últimos 24h
+- 🔁 Retry com backoff exponencial para falhas transitórias do GitHub
+- 🧠 Deduplicação por `event_id` para evitar issues duplicadas
+- 🚦 Circuit breaker para evitar cascata de falhas
+- 🚨 Alertas opcionais por webhook quando o circuito abre
 - ⚙️ Fácil deploy em Vercel (serverless)
 
 ## Requisitos
@@ -51,6 +55,8 @@ GITHUB_TOKEN=seu_token_github
 GITHUB_OWNER=seu_usuario_github
 GITHUB_REPO=seu_repositorio
 SENTRY_WEBHOOK_SECRET=seu_sentry_secret
+ALERT_WEBHOOK_URL=https://seu-slack-ou-discord-webhook
+ALERT_WEBHOOK_TOKEN=opcional_bearer_token
 PORT=3000
 ```
 
@@ -146,6 +152,8 @@ Guia completo em: `VERCEL_DEPLOY.md`.
 | `GITHUB_OWNER` | Proprietário do repositório GitHub | ✓ |
 | `GITHUB_REPO` | Nome do repositório | ✓ |
 | `SENTRY_WEBHOOK_SECRET` | Secret do webhook Sentry | ✗ |
+| `ALERT_WEBHOOK_URL` | URL para alerta em falha crítica (circuit breaker) | ✗ |
+| `ALERT_WEBHOOK_TOKEN` | Bearer token do webhook de alerta | ✗ |
 | `PORT` | Porta do servidor (padrão: 3000) | ✗ |
 
 ## Endpoints
@@ -191,6 +199,11 @@ Verifique se o payload do Sentry está bem formado e contém a estrutura esperad
 1. Verifique se o webhook está apontando para a URL correta
 2. Verifique os logs do servidor
 3. Teste manualmente enviando um POST para `/webhook/sentry`
+
+### Erro: "Webhook temporarily unavailable due to repeated failures"
+
+O circuit breaker foi ativado após falhas consecutivas no GitHub API.
+O webhook volta a aceitar tráfego automaticamente após o cooldown.
 
 ## Contribuindo
 

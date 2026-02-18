@@ -4,9 +4,37 @@ const crypto = require('crypto');
 const ALLOWED_LEVEL_LABELS = new Set(['fatal', 'error', 'warning', 'info', 'debug']);
 const RATE_WINDOW_MS = 15 * 60 * 1000;
 const RATE_MAX_REQUESTS = 100;
+const DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_DEDUPE_KEYS = 5000;
+const GITHUB_RETRY_DELAYS_MS = [0, 500, 1500, 3000];
+const CIRCUIT_FAILURE_THRESHOLD = 5;
+const CIRCUIT_COOLDOWN_MS = 60 * 1000;
 
 const rateState = globalThis.__sentryWebhookRateState || new Map();
+const processedEventState = globalThis.__sentryWebhookProcessedEvents || new Map();
+const metricsState = globalThis.__sentryWebhookMetrics || {
+  totalRequests: 0,
+  successRequests: 0,
+  failedRequests: 0,
+  duplicateRequests: 0,
+  invalidPayloadRequests: 0,
+  invalidSignatureRequests: 0,
+  rateLimitedRequests: 0,
+  circuitOpenRequests: 0,
+  retryAttempts: 0,
+  retrySuccesses: 0,
+  lastSuccessAt: null,
+  lastFailureAt: null,
+  lastFailureReason: null,
+};
+const circuitState = globalThis.__sentryWebhookCircuit || {
+  consecutiveFailures: 0,
+  openUntilMs: 0,
+};
 globalThis.__sentryWebhookRateState = rateState;
+globalThis.__sentryWebhookProcessedEvents = processedEventState;
+globalThis.__sentryWebhookMetrics = metricsState;
+globalThis.__sentryWebhookCircuit = circuitState;
 
 const logger = {
   info(message, meta = {}) {
@@ -53,6 +81,8 @@ function getConfig() {
     githubOwner: process.env.GITHUB_OWNER,
     githubRepo: process.env.GITHUB_REPO,
     sentryWebhookSecret: process.env.SENTRY_WEBHOOK_SECRET,
+    alertWebhookUrl: process.env.ALERT_WEBHOOK_URL,
+    alertWebhookToken: process.env.ALERT_WEBHOOK_TOKEN,
   };
 }
 
@@ -204,6 +234,156 @@ function mapGithubError(error) {
   return { status: 502, message: `GitHub API request failed (${status}).` };
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableGithubError(error) {
+  if (!axios.isAxiosError(error)) return false;
+  if (!error.response) return true;
+  return [408, 429, 500, 502, 503, 504].includes(error.response.status);
+}
+
+async function createGithubIssueWithRetry(githubUrl, payload, headers) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt < GITHUB_RETRY_DELAYS_MS.length; attempt += 1) {
+    const delayMs = GITHUB_RETRY_DELAYS_MS[attempt];
+    if (delayMs > 0) {
+      await sleep(delayMs);
+    }
+
+    try {
+      if (attempt > 0) {
+        metricsState.retryAttempts += 1;
+      }
+      const response = await axios.post(githubUrl, payload, { headers });
+      if (attempt > 0) {
+        metricsState.retrySuccesses += 1;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+      const retryable = isRetryableGithubError(error);
+      const isLastAttempt = attempt === GITHUB_RETRY_DELAYS_MS.length - 1;
+
+      logger.warn('GitHub issue creation attempt failed', {
+        attempt: attempt + 1,
+        maxAttempts: GITHUB_RETRY_DELAYS_MS.length,
+        retryable,
+        status: axios.isAxiosError(error) ? error.response?.status : undefined,
+      });
+
+      if (!retryable || isLastAttempt) {
+        throw lastError;
+      }
+    }
+  }
+
+  throw lastError || new Error('Unknown GitHub issue creation failure');
+}
+
+function resolveEventId(payload, issue, event) {
+  return asNonEmptyString(
+    event?.eventID
+      || event?.id
+      || payload?.event_id
+      || payload?.eventId
+      || issue?.lastEventId
+      || issue?.lastEventID,
+    '',
+  );
+}
+
+function cleanupProcessedEvents() {
+  const now = Date.now();
+  if (processedEventState.size <= MAX_DEDUPE_KEYS) return;
+
+  for (const [key, value] of processedEventState.entries()) {
+    if (!value || now - value.seenAtMs > DEDUPE_TTL_MS) {
+      processedEventState.delete(key);
+    }
+  }
+}
+
+function getDedupeHit(eventId) {
+  if (!eventId) return null;
+  const entry = processedEventState.get(eventId);
+  if (!entry) return null;
+  if (Date.now() - entry.seenAtMs > DEDUPE_TTL_MS) {
+    processedEventState.delete(eventId);
+    return null;
+  }
+  return entry;
+}
+
+function markProcessedEvent(eventId, issueNumber) {
+  if (!eventId) return;
+  processedEventState.set(eventId, {
+    issueNumber: typeof issueNumber === 'number' ? issueNumber : null,
+    seenAtMs: Date.now(),
+  });
+}
+
+function isCircuitOpen() {
+  return circuitState.openUntilMs > Date.now();
+}
+
+function markSuccess() {
+  circuitState.consecutiveFailures = 0;
+  circuitState.openUntilMs = 0;
+  metricsState.successRequests += 1;
+  metricsState.lastSuccessAt = new Date().toISOString();
+}
+
+function markFailure(reason) {
+  circuitState.consecutiveFailures += 1;
+  metricsState.failedRequests += 1;
+  metricsState.lastFailureAt = new Date().toISOString();
+  metricsState.lastFailureReason = asNonEmptyString(reason, 'unknown');
+
+  if (isCircuitOpen()) {
+    return { openedNow: false, openUntilMs: circuitState.openUntilMs };
+  }
+
+  if (circuitState.consecutiveFailures >= CIRCUIT_FAILURE_THRESHOLD) {
+    circuitState.openUntilMs = Date.now() + CIRCUIT_COOLDOWN_MS;
+    circuitState.consecutiveFailures = 0;
+    return { openedNow: true, openUntilMs: circuitState.openUntilMs };
+  }
+
+  return { openedNow: false, openUntilMs: circuitState.openUntilMs };
+}
+
+async function sendFailureAlert(config, reason, context = {}) {
+  if (!config.alertWebhookUrl) return;
+
+  const payload = {
+    source: 'sentry-github-webhook',
+    severity: 'critical',
+    reason,
+    timestamp: new Date().toISOString(),
+    context,
+  };
+
+  try {
+    await axios.post(config.alertWebhookUrl, payload, {
+      timeout: 3000,
+      headers: {
+        'content-type': 'application/json',
+        ...(config.alertWebhookToken
+          ? { authorization: `Bearer ${config.alertWebhookToken}` }
+          : {}),
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to deliver webhook failure alert', {
+      reason: axios.isAxiosError(error) ? error.message : 'unknown',
+      status: axios.isAxiosError(error) ? error.response?.status : undefined,
+    });
+  }
+}
+
 function checkRateLimit(ip) {
   const now = Date.now();
   const key = asNonEmptyString(ip, 'unknown');
@@ -265,19 +445,39 @@ async function readRawBody(req) {
 }
 
 module.exports = async function sentryWebhookHandler(req, res) {
+  metricsState.totalRequests += 1;
+
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { githubToken, githubOwner, githubRepo, sentryWebhookSecret } = getConfig();
+  const config = getConfig();
+  const { githubToken, githubOwner, githubRepo, sentryWebhookSecret } = config;
   if (!githubToken || !githubOwner || !githubRepo) {
     logger.error('Missing required environment variables', {
       hasGithubToken: Boolean(githubToken),
       hasGithubOwner: Boolean(githubOwner),
       hasGithubRepo: Boolean(githubRepo),
     });
+    markFailure('missing_config');
     return res.status(500).json({ error: 'Missing required environment variables' });
+  }
+
+  cleanupExpiredRateLimitKeys();
+  cleanupProcessedEvents();
+
+  if (isCircuitOpen()) {
+    metricsState.circuitOpenRequests += 1;
+    const retryAfterMs = Math.max(0, circuitState.openUntilMs - Date.now());
+    logger.warn('Circuit breaker open - rejecting request', {
+      retryAfterMs,
+      openUntil: new Date(circuitState.openUntilMs).toISOString(),
+    });
+    return res.status(503).json({
+      error: 'Webhook temporarily unavailable due to repeated failures',
+      retryAfterMs,
+    });
   }
 
   let rawBody = '';
@@ -286,6 +486,7 @@ module.exports = async function sentryWebhookHandler(req, res) {
     rawBody = await readRawBody(req);
     payload = rawBody ? JSON.parse(rawBody) : {};
   } catch (error) {
+    metricsState.invalidPayloadRequests += 1;
     logger.warn('Invalid JSON payload', {
       reason: error?.message || 'unknown',
     });
@@ -293,9 +494,9 @@ module.exports = async function sentryWebhookHandler(req, res) {
   }
 
   const ip = getClientIp(req);
-  cleanupExpiredRateLimitKeys();
   const limiter = checkRateLimit(ip);
   if (!limiter.allowed) {
+    metricsState.rateLimitedRequests += 1;
     logger.warn('Rate limit exceeded for webhook endpoint', {
       ip,
       resetAt: new Date(limiter.resetAt).toISOString(),
@@ -304,6 +505,7 @@ module.exports = async function sentryWebhookHandler(req, res) {
   }
 
   if (!isValidSentrySignature(rawBody, req, sentryWebhookSecret)) {
+    metricsState.invalidSignatureRequests += 1;
     logger.warn('Rejected webhook due to invalid signature', {
       ip,
       path: req.url,
@@ -324,7 +526,23 @@ module.exports = async function sentryWebhookHandler(req, res) {
     });
 
     if (!issue && !event) {
+      metricsState.invalidPayloadRequests += 1;
       return res.status(400).json({ error: 'Invalid payload' });
+    }
+
+    const eventId = resolveEventId(payload, issue, event);
+    const dedupeHit = getDedupeHit(eventId);
+    if (dedupeHit) {
+      metricsState.duplicateRequests += 1;
+      logger.info('Duplicate event skipped', {
+        eventId,
+        existingIssueNumber: dedupeHit.issueNumber,
+      });
+      return res.status(200).json({
+        success: true,
+        duplicate: true,
+        issueNumber: dedupeHit.issueNumber,
+      });
     }
 
     const issueLevel = getIssueLevelLabel(issue?.level || event?.level);
@@ -355,7 +573,7 @@ ${issueCulprit}
     `.trim();
 
     const githubUrl = `https://api.github.com/repos/${githubOwner}/${githubRepo}/issues`;
-    const response = await axios.post(
+    const response = await createGithubIssueWithRetry(
       githubUrl,
       {
         title,
@@ -363,24 +581,46 @@ ${issueCulprit}
         labels: ['sentry', issueLevel],
       },
       {
-        headers: {
-          Authorization: `token ${githubToken}`,
-          Accept: 'application/vnd.github.v3+json',
-        },
+        Authorization: `token ${githubToken}`,
+        Accept: 'application/vnd.github.v3+json',
       },
     );
+
+    markProcessedEvent(eventId, response.data.number);
+    markSuccess();
 
     logger.info('Created GitHub issue from Sentry event', {
       issueNumber: response.data.number,
       projectName,
       issueLevel,
       action,
+      eventId,
       sourcePath: req.url,
+      metrics: {
+        totalRequests: metricsState.totalRequests,
+        successRequests: metricsState.successRequests,
+        failedRequests: metricsState.failedRequests,
+        duplicateRequests: metricsState.duplicateRequests,
+        retryAttempts: metricsState.retryAttempts,
+        retrySuccesses: metricsState.retrySuccesses,
+      },
     });
 
     return res.status(200).json({ success: true, issueNumber: response.data.number });
   } catch (error) {
     const mappedError = mapGithubError(error);
+    const circuit = markFailure(mappedError.message);
+
+    if (circuit.openedNow) {
+      await sendFailureAlert(config, 'circuit_breaker_open', {
+        openUntil: new Date(circuit.openUntilMs).toISOString(),
+        failureReason: mappedError.message,
+      });
+      logger.error('Circuit breaker opened after consecutive failures', {
+        openUntil: new Date(circuit.openUntilMs).toISOString(),
+      });
+    }
+
     logger.error('Failed to create GitHub issue from Sentry event', {
       statusCode: mappedError.status,
       reason: mappedError.message,
@@ -389,6 +629,12 @@ ${issueCulprit}
       githubRequestId: axios.isAxiosError(error)
         ? error.response?.headers?.['x-github-request-id']
         : undefined,
+      metrics: {
+        totalRequests: metricsState.totalRequests,
+        successRequests: metricsState.successRequests,
+        failedRequests: metricsState.failedRequests,
+        duplicateRequests: metricsState.duplicateRequests,
+      },
     });
     return res.status(mappedError.status).json({ error: mappedError.message });
   }
