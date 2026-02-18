@@ -248,12 +248,6 @@ app.post(WEBHOOK_PATHS, webhookLimiter, async (req, res) => {
     name: 'Process Sentry Webhook',
   });
 
-  try {
-        ip: req.ip,
-      });
-      return res.status(401).json({ error: 'Invalid webhook signature' });
-    }
-
     const { issue, event, projectName, action } = resolveWebhookPayloadEntities(req.body);
     const hookResource = req.get('sentry-hook-resource') || req.get('x-sentry-hook-resource') || 'unknown';
 
