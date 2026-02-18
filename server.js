@@ -242,6 +242,9 @@ app.post(WEBHOOK_PATHS, webhookLimiter, async (req, res) => {
     if (!isValidSentrySignature(req)) {
       logger.warn('Rejected webhook due to invalid signature', {
         path: req.path,
+            });
+          return res.status(401).json({ error: 'Invalid signature' });
+        }
 
     logger.info('Received Sentry webhook payload', {
       path: req.path,
