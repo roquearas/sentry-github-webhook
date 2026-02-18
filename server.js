@@ -243,14 +243,6 @@ app.post(WEBHOOK_PATHS, webhookLimiter, async (req, res) => {
       logger.warn('Rejected webhook due to invalid signature', {
         path: req.path,
 
-          const transaction = Sentry.startTransaction({
-    op: 'webhook.sentry.event',
-    name: 'Process Sentry Webhook',
-  });
-
-    const { issue, event, projectName, action } = resolveWebhookPayloadEntities(req.body);
-    const hookResource = req.get('sentry-hook-resource') || req.get('x-sentry-hook-resource') || 'unknown';
-
     logger.info('Received Sentry webhook payload', {
       path: req.path,
       action,
