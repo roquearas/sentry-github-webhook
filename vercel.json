@@ -1,23 +1,22 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "api/**/*.js",
-      "use": "@vercel/node"
+  "functions": {
+    "api/**/*.js": {
+      "runtime": "nodejs20.x"
     }
-  ],
-  "routes": [
+  },
+  "rewrites": [
     {
-      "src": "/webhook/sentry",
-      "dest": "/api/webhook"
+      "source": "/webhook/sentry",
+      "destination": "/api/webhook"
     },
     {
-      "src": "/sentry-webhook",
-      "dest": "/api/webhook"
+      "source": "/sentry-webhook",
+      "destination": "/api/webhook"
     },
     {
-      "src": "/health",
-      "dest": "/api/health"
+      "source": "/health",
+      "destination": "/api/health"
     }
   ]
 }
