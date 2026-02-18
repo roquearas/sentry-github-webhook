@@ -6,7 +6,8 @@ const rateLimit = require('express-rate-limit');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const WEBHOOK_PATH = '/webhook/sentry';
+const WEBHOOK_PATHS = ['/webhook/sentry', '/sentry-webhook'];
+const PRIMARY_WEBHOOK_PATH = WEBHOOK_PATHS[0];
 const ALLOWED_LEVEL_LABELS = new Set(['fatal', 'error', 'warning', 'info', 'debug']);
 
 const logger = {
@@ -97,6 +98,81 @@ function getIssueLevelLabel(level) {
   return ALLOWED_LEVEL_LABELS.has(normalized) ? normalized : 'error';
 }
 
+function resolveWebhookPayloadEntities(payload) {
+  const root = payload && typeof payload === 'object' ? payload : {};
+  const data = root.data && typeof root.data === 'object' ? root.data : {};
+
+  const issue = data.issue && typeof data.issue === 'object'
+    ? data.issue
+    : (root.issue && typeof root.issue === 'object' ? root.issue : null);
+
+  const event = data.event && typeof data.event === 'object'
+    ? data.event
+    : (root.event && typeof root.event === 'object' ? root.event : null);
+
+  const projectSlug = asNonEmptyString(
+    data.project_slug || root.project_slug || root.projectSlug,
+    '',
+  );
+
+  const projectName = getProjectName({
+    project_name: asNonEmptyString(data.project_name || root.project_name, '') || projectSlug,
+    project: data.project || root.project || (projectSlug ? { name: projectSlug } : undefined),
+  });
+
+  const action = asNonEmptyString(root.action, 'unknown');
+  return { issue, event, projectName, action };
+}
+
+function resolveIssueTitle(issue, event) {
+  return asNonEmptyString(issue?.title, '')
+    || asNonEmptyString(event?.title, '')
+    || asNonEmptyString(event?.message, '').slice(0, 160)
+    || 'Sentry event sem titulo';
+}
+
+function resolveIssueUrl(issue, event) {
+  return asNonEmptyString(issue?.url, '')
+    || asNonEmptyString(event?.web_url, '')
+    || asNonEmptyString(event?.url, '')
+    || '#';
+}
+
+function resolveIssueCulprit(issue, event) {
+  return asNonEmptyString(issue?.culprit, '')
+    || asNonEmptyString(event?.culprit, '')
+    || asNonEmptyString(event?.message, '')
+    || 'Sem stacktrace/cause';
+}
+
+function resolveFirstSeen(issue, event) {
+  return asNonEmptyString(issue?.firstSeen || issue?.first_seen, '')
+    || asNonEmptyString(event?.dateCreated || event?.received, '')
+    || 'N/A';
+}
+
+function resolveLastSeen(issue, event) {
+  return asNonEmptyString(issue?.lastSeen || issue?.last_seen, '')
+    || asNonEmptyString(event?.dateCreated || event?.received, '')
+    || 'N/A';
+}
+
+function resolveEventCount(issue, event) {
+  const issueCount = getIssueEventCountLast24h(issue);
+  if (issueCount > 0) return issueCount;
+
+  const eventCount = event?.count;
+  if (typeof eventCount === 'number' && eventCount > 0) return eventCount;
+  if (typeof eventCount === 'string') {
+    const parsed = Number(eventCount);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return 1;
+}
+
 function getSignatureFromHeaders(req) {
   const header = req.get('sentry-hook-signature') || req.get('x-sentry-hook-signature');
   if (!header) return '';
@@ -151,32 +227,41 @@ function mapGithubError(error) {
   return { status: 502, message: `GitHub API request failed (${status}).` };
 }
 
-// Webhook endpoint to receive Sentry events
-app.post(WEBHOOK_PATH, webhookLimiter, async (req, res) => {
+// Webhook endpoint(s) to receive Sentry events
+app.post(WEBHOOK_PATHS, webhookLimiter, async (req, res) => {
   try {
     if (!isValidSentrySignature(req)) {
       logger.warn('Rejected webhook due to invalid signature', {
-        path: WEBHOOK_PATH,
+        path: req.path,
         ip: req.ip,
       });
       return res.status(401).json({ error: 'Invalid webhook signature' });
     }
 
-    const { data } = req.body;
+    const { issue, event, projectName, action } = resolveWebhookPayloadEntities(req.body);
+    const hookResource = req.get('sentry-hook-resource') || req.get('x-sentry-hook-resource') || 'unknown';
 
-    if (!data || !data.issue) {
+    logger.info('Received Sentry webhook payload', {
+      path: req.path,
+      action,
+      resource: hookResource,
+      hasIssue: Boolean(issue),
+      hasEvent: Boolean(event),
+    });
+
+    if (!issue && !event) {
       return res.status(400).json({ error: 'Invalid payload' });
     }
 
-    const issue = data.issue;
-    const projectName = getProjectName(data);
-    const issueLevel = getIssueLevelLabel(issue.level);
-    const issueTitle = asNonEmptyString(issue.title, 'Erro sem titulo');
-    const issueUrl = asNonEmptyString(issue.url, '#');
-    const issueCulprit = asNonEmptyString(issue.culprit, 'Sem stacktrace/cause');
-    const issueEventsLast24h = getIssueEventCountLast24h(issue);
-    const firstSeen = asNonEmptyString(issue.firstSeen, 'N/A');
-    const lastSeen = asNonEmptyString(issue.lastSeen, 'N/A');
+    const issueLevel = getIssueLevelLabel(issue?.level || event?.level);
+    const issueTitle = resolveIssueTitle(issue, event);
+    const issueUrl = resolveIssueUrl(issue, event);
+    const issueCulprit = resolveIssueCulprit(issue, event);
+    const issueEventsLast24h = resolveEventCount(issue, event);
+    const firstSeen = resolveFirstSeen(issue, event);
+    const lastSeen = resolveLastSeen(issue, event);
+    const sentryIssueId = asNonEmptyString(issue?.shortId || issue?.shortID || issue?.id, 'N/A');
+    const sentryEventId = asNonEmptyString(event?.eventID || event?.id, 'N/A');
 
     const title = `[Sentry] ${issueTitle}`;
     const body = `
@@ -184,6 +269,8 @@ app.post(WEBHOOK_PATH, webhookLimiter, async (req, res) => {
 **Level**: ${issueLevel}
 **URL**: [View in Sentry](${issueUrl})
 **Events**: ${issueEventsLast24h} in last 24h
+**Sentry Issue**: ${sentryIssueId}
+**Sentry Event ID**: ${sentryEventId}
 
 **First Seen**: ${firstSeen}
 **Last Seen**: ${lastSeen}
@@ -214,6 +301,8 @@ ${issueCulprit}
       issueNumber: response.data.number,
       projectName,
       issueLevel,
+      action,
+      sourcePath: req.path,
     });
     res.json({ success: true, issueNumber: response.data.number });
   } catch (error) {
@@ -248,5 +337,8 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, () => {
   logger.info('Sentry GitHub Webhook server started', { port: PORT });
-  logger.info('Webhook endpoint ready', { url: `http://localhost:${PORT}${WEBHOOK_PATH}` });
+  logger.info('Webhook endpoints ready', {
+    urls: WEBHOOK_PATHS.map((path) => `http://localhost:${PORT}${path}`),
+    primary: `http://localhost:${PORT}${PRIMARY_WEBHOOK_PATH}`,
+  });
 });

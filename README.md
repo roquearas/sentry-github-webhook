@@ -157,6 +157,7 @@ git push heroku main
 ### POST `/webhook/sentry`
 
 Recebe eventos do Sentry e cria issues no GitHub.
+Compatibilidade: o endpoint legado `/sentry-webhook` também é aceito.
 
 **Payload esperado**: Webhook payload do Sentry
 

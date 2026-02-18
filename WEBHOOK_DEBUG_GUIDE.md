@@ -57,7 +57,7 @@ railway logs
 # Copiar um payload de exemplo do Sentry Webhook Documentation
 # ou usar um evento real recente
 
-curl -X POST https://seu-webhook-url.herokuapp.com/sentry-webhook \
+curl -X POST https://seu-webhook-url.herokuapp.com/webhook/sentry \
   -H "Content-Type: application/json" \
   -H "X-Sentry-Hook-Resource: event" \
   -d '{
@@ -97,7 +97,7 @@ https.get('https://api.github.com/user', {
 
 #### 4.1 Adicionar logs detalhados em `server.js`:
 ```javascript
-app.post('/sentry-webhook', (req, res) => {
+app.post('/webhook/sentry', (req, res) => {
   console.log('\n=== WEBHOOK RECEBIDO ===');
   console.log('Timestamp:', new Date().toISOString());
   console.log('Headers:', req.headers);
@@ -224,7 +224,7 @@ ngrok http 3000
 node server.js
 
 # Terminal 3:
-curl -X POST https://abc123.ngrok.io/sentry-webhook \
+curl -X POST https://abc123.ngrok.io/webhook/sentry \
   -H "Content-Type: application/json" \
   -d '{"action":"created","data":{"event":{"message":"Test"}}'
 ```

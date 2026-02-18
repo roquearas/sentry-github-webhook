@@ -128,7 +128,7 @@ Opções:
 Atualizar URL em:  
 Sentry → Settings → Integrations → GitHub Integration → Webhook URL
 
-Formato: `https://seu-app.herokuapp.com/sentry-webhook`
+Formato: `https://seu-app.herokuapp.com/webhook/sentry`
 
 ### 6. Teste end-to-end
 **Dependência:** Webhook URL atualizado  
