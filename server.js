@@ -266,21 +266,21 @@ app.post(WEBHOOK_PATHS, webhookLimiter, async (req, res) => {
     const sentryEventId = asNonEmptyString(event?.eventID || event?.id, 'N/A');
 
     const title = `[Sentry] ${issueTitle}`;
-    const body = `
-**Project**: ${projectName}
+const body = `    **Project**: ${projectName}
 **Level**: ${issueLevel}
 **URL**: [View in Sentry](${issueUrl})
 **Events**: ${issueEventsLast24h} in last 24h
 **Sentry Issue**: ${sentryIssueId}
 **Sentry Event ID**: ${sentryEventId}
-
 **First Seen**: ${firstSeen}
 **Last Seen**: ${lastSeen}
 
 \`\`\`
 ${issueCulprit}
 \`\`\`
-    `.trim();
+`.trim();
+    
+
 
     // Create GitHub issue
     const githubUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/issues`;
