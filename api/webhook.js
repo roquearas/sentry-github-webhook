@@ -467,6 +467,39 @@ module.exports = async function sentryWebhookHandler(req, res) {
   cleanupExpiredRateLimitKeys();
   cleanupProcessedEvents();
 
+    // Rate limiting check
+  const clientIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+  const rateLimitKey = `ratelimit:${clientIp}`;
+  
+  if (!rateState.get(rateLimitKey)) {
+    rateState.set(rateLimitKey, { count: 0, windowStart: Date.now() });
+  }
+  
+  const rateData = rateState.get(rateLimitKey);
+  const now = Date.now();
+  
+  // Reset window if expired
+  if (now - rateData.windowStart > RATE_WINDOW_MS) {
+    rateData.count = 0;
+    rateData.windowStart = now;
+  }
+  
+  // Check if rate limit exceeded
+  if (rateData.count >= RATE_MAX_REQUESTS) {
+    metricsState.rateLimitedRequests += 1;
+    logger.warn('Rate limit exceeded', {
+      clientIp,
+      count: rateData.count,
+      windowStart: new Date(rateData.windowStart).toISOString(),
+    });
+    return res.status(429).json({ 
+      error: 'Rate limit exceeded. Please try again later.',
+      retryAfter: Math.ceil((RATE_WINDOW_MS - (now - rateData.windowStart)) / 1000)
+    });
+  }
+  
+  rateData.count += 1;
+
   if (isCircuitOpen()) {
     metricsState.circuitOpenRequests += 1;
     const retryAfterMs = Math.max(0, circuitState.openUntilMs - Date.now());
